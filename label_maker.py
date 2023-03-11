@@ -2,6 +2,8 @@ from enum import IntEnum, IntFlag
 import sys
 import contextlib
 import bluetooth
+import json
+import base64
 from label_rasterizer import encode_png, rasterize
 
 
@@ -130,6 +132,8 @@ def bt_socket_manager(*args, **kwargs):
     socket.close()
 
 
+sent_datagrams = []
+
 def make_label(image_path, bt_address, bt_channel):
     data = encode_png(image_path)
 
@@ -158,68 +162,74 @@ def make_label(image_path, bt_address, bt_channel):
             handle_status_information(status_information)
 
 
+def socket_send(socket, data):
+    # base64 because: https://stackoverflow.com/questions/44682018/typeerror-object-of-type-bytes-is-not-json-serializable
+    # I have to... decode it to ascii...???! 🤦
+    sent_datagrams.append(base64.b64encode(data).decode('ascii'))
+    socket.send(data)
+
 def send_invalidate(socket):
     # send 100 null bytes
-    socket.send(b"\x00" * 100)
+    socket_send(socket, b"\x00" * 100)
 
 
 def send_initialize(socket):
     # send [1B 40]
-    socket.send(b"\x1B\x40")
+    socket_send(socket, b"\x1B\x40")
 
 
 def send_switch_dynamic_command_mode(socket):
     # set dynamic command mode to "raster mode" [1B 69 61 {01}]
-    socket.send(b"\x1B\x69\x61\x01")
+    socket_send(socket, b"\x1B\x69\x61\x01")
 
 
 def send_switch_automatic_status_notification_mode(socket):
     # set automatic status notification mode to "notify" [1B 69 21 {00}]
-    socket.send(b"\x1B\x69\x21\x00")
+    socket_send(socket, b"\x1B\x69\x21\x00")
 
 
 def send_print_information_command(socket, data):
     # print to 24mm tape [1B 69 7A {84 00 18 00 <data length 4 bytes> 00 00}]
-    socket.send(b"\x1B\x69\x7A\x84\x00\x18\x00")
-    socket.send((len(data) >> 4).to_bytes(4, 'little'))
-    socket.send(b"\x00\x00")
+    socket_send(socket, b"\x1B\x69\x7A\x84\x00\x18\x00")
+    socket_send(socket, (len(data) >> 4).to_bytes(4, 'little'))
+    socket_send(socket, b"\x00\x00")
 
 
 def send_various_mode_settings(socket):
     # set to auto-cut, no mirror printing [1B 69 4D {40}]
-    socket.send(b"\x1B\x69\x4D")
-    socket.send(Mode.AUTO_CUT.to_bytes(1, "big"))
+    socket_send(socket, b"\x1B\x69\x4D")
+    socket_send(socket, Mode.AUTO_CUT.to_bytes(1, "big"))
 
 
 def send_advanced_mode_settings(socket):
     # set print chaining off [1B 69 4B {08}]
-    socket.send(b"\x1B\x69\x4B\x08")
+    socket_send(socket, b"\x1B\x69\x4B\x08")
 
 
 def send_specify_margin_amount(socket):
     # set margin (feed) amount to 0 [1B 69 64 {00 00}]
-    socket.send(b"\x1B\x69\x64\x00\x00")
+    socket_send(socket, b"\x1B\x69\x64\x00\x00")
 
 
 def send_select_compression_mode(socket):
     # set to TIFF compression [4D {02}]
-    socket.send(b"\x4D\x02")
+    socket_send(socket, b"\x4D\x02")
 
 
 def send_raster_data(socket, data):
     # send all raster data lines
     for line in rasterize(data):
-        socket.send(bytes(line))
+        socket_send(socket, bytes(line))
 
 
 def send_print_command_with_feeding(socket):
     # print and feed [1A]
-    socket.send(b"\x1A")
+    socket_send(socket, b"\x1A")
 
 
 def send_status_information_request(socket):
     # request status information [1B 69 53]
-    socket.send(b"\x1B\x69\x53")
+    socket_send(socket, b"\x1B\x69\x53")
 
 
 def receive_status_information_response(socket):
@@ -250,6 +260,9 @@ def handle_status_information(status_information):
         mode = Mode(status_information[STATUS_OFFSET_MODE])
 
         print("Mode: %s" % ", ".join([f.name for f in Mode if f in mode]))
+
+        with open('sent_datagrams.json', 'w', encoding='utf-8') as f:
+            json.dump(sent_datagrams, f, ensure_ascii=False, indent=4)
 
         sys.exit(0)
 
@@ -311,7 +324,6 @@ def main(*args):
     bt_channel = int(args[3]) if len(args) > 3 else 1
 
     make_label(image_path, bt_address, bt_channel)
-
 
 if __name__== "__main__":
     main(*sys.argv)
